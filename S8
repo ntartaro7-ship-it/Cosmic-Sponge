@@ -1,0 +1,177 @@
+import numpy as np
+from scipy.fft import fft2, ifft2, fftfreq
+from scipy.ndimage import gaussian_filter
+
+# --- PHYSICAL AND STRUCTURAL CONSTANTS ---
+# Reference: Structural Relativity Metric Yield Threshold
+METRIC_YIELD_THRESHOLD = 0.0068
+G_BASE = 1.0  # Normalized Gravitational Constant
+GRID_RESOLUTION = 150
+STIFFNESS_CONTRAST = 1000.0  # Localized stiffness ratio (Galaxy vs. Vacuum)
+
+# --- KINEMATIC STRAIN DERIVATION (TRUE METRIC STRAIN) ---
+Z_YIELD = 0.08
+A_YIELD = 1.0 / (1.0 + Z_YIELD)
+# Reference state for zero-stress configuration
+A_ZERO_STRESS = A_YIELD / np.exp(METRIC_YIELD_THRESHOLD)
+Z_START = (1.0 / A_ZERO_STRESS) - 1.0
+
+
+def get_kinematic_strain(z):
+    """Calculates the logarithmic metric strain at a target redshift z."""
+    a = 1.0 / (1.0 + z)
+    strain = np.log(a / A_ZERO_STRESS)
+    return max(0.0, strain)
+
+
+# --- 1. COSMIC MASS DISTRIBUTION (Non-linear Density Field) ---
+def generate_density_field(N):
+    """Generates a primordial density field using a filtered Power Spectrum."""
+    delta_k = 1.0
+    k_freq = fftfreq(N, d=delta_k) * 2 * np.pi
+    kx, ky = np.meshgrid(k_freq, k_freq)
+    k_mag = np.sqrt(kx ** 2 + ky ** 2)
+    k_mag[0, 0] = 1.0
+
+    # Power Spectrum P(k) initialization
+    Pk = k_mag ** 1.0 * np.exp(-0.5 * (k_mag * 1.5) ** 2)
+    Pk[0, 0] = 0.0
+
+    np.random.seed(42)
+    random_field_k = (np.random.normal(size=(N, N)) + 1j * np.random.normal(size=(N, N))) * np.sqrt(Pk)
+    delta_linear = ifft2(random_field_k).real
+    delta_linear = (delta_linear - np.mean(delta_linear)) / np.std(delta_linear)
+
+    # Non-linear enhancement (Structure Formation Proxy)
+    mass_density = np.exp(delta_linear * 1.2)
+    mass_density /= np.mean(mass_density)
+
+    # Gaussian smoothing to model dark matter halo profiles and gas distribution
+    return gaussian_filter(mass_density, sigma=1.0)
+
+
+# --- 2. NON-LINEAR INCREMENTAL MECHANICAL SOLVER (CDM Framework) ---
+def solver_mechanical_step(mass_density, u_prev, v_prev, D_prev, global_strain, iterations=500):
+    if global_strain <= 0:
+        return np.zeros_like(mass_density), u_prev, v_prev, D_prev
+
+    # Initial Material Stiffness Calculation
+    E_init = 1.0 + (mass_density * STIFFNESS_CONTRAST)
+
+    # Stiffness degradation via Continuum Damage Mechanics (CDM)
+    E = np.maximum(E_init * (1.0 - D_prev), 0.05)
+
+    u, v = u_prev.copy(), v_prev.copy()
+
+    # Boundary Conditions (Strain-driven expansion)
+    u[:, -1] = GRID_RESOLUTION * global_strain
+    v[-1, :] = GRID_RESOLUTION * global_strain
+
+    # Jacobi Relaxation with Under-Relaxation for numerical stability
+    omega = 0.1
+
+    for _ in range(iterations):
+        u_old, v_old = u.copy(), v.copy()
+
+        # Spatial gradients of the Effective Young Modulus
+        Edx = (np.roll(E, -1, axis=1) - np.roll(E, 1, axis=1)) / 2.0
+        Edy = (np.roll(E, -1, axis=0) - np.roll(E, 1, axis=0)) / 2.0
+
+        # Gradient clipping to ensure convergence in high-contrast zones
+        grad_x = np.clip(Edx[1:-1, 1:-1] / E[1:-1, 1:-1], -5.0, 5.0)
+        grad_y = np.clip(Edy[1:-1, 1:-1] / E[1:-1, 1:-1], -5.0, 5.0)
+
+        uxx = np.roll(u_old, -1, axis=1) + np.roll(u_old, 1, axis=1)
+        uyy = np.roll(u_old, -1, axis=0) + np.roll(u_old, 1, axis=0)
+        udx = (np.roll(u_old, -1, axis=1) - np.roll(u_old, 1, axis=1)) / 2.0
+
+        vxx = np.roll(v_old, -1, axis=1) + np.roll(v_old, 1, axis=1)
+        vyy = np.roll(v_old, -1, axis=0) + np.roll(v_old, 1, axis=0)
+        vdy = (np.roll(v_old, -1, axis=0) - np.roll(v_old, 1, axis=0)) / 2.0
+
+        # Equilibrium displacement computation
+        u_target = 0.25 * (uxx[1:-1, 1:-1] + uyy[1:-1, 1:-1] + grad_x * udx[1:-1, 1:-1])
+        v_target = 0.25 * (vxx[1:-1, 1:-1] + vyy[1:-1, 1:-1] + grad_y * vdy[1:-1, 1:-1])
+
+        u[1:-1, 1:-1] = (1.0 - omega) * u_old[1:-1, 1:-1] + omega * u_target
+        v[1:-1, 1:-1] = (1.0 - omega) * v_old[1:-1, 1:-1] + omega * v_target
+
+        # Re-enforce BCs
+        u[:, 0] = 0;
+        u[:, -1] = GRID_RESOLUTION * global_strain
+        v[0, :] = 0;
+        v[-1, :] = GRID_RESOLUTION * global_strain
+
+    # Post-processing: Local Metric Strain derivation
+    ex = (np.roll(u, -1, axis=1) - np.roll(u, 1, axis=1)) / 2.0
+    ey = (np.roll(v, -1, axis=0) - np.roll(v, 1, axis=0)) / 2.0
+    local_strain = np.sqrt(ex ** 2 + ey ** 2)
+
+    # Internal state update: Damage evolution (Exponential Softening Law)
+    SOFTENING_MODULUS = 0.2
+    D_new = np.zeros_like(D_prev)
+    yield_mask = local_strain > METRIC_YIELD_THRESHOLD
+    D_new[yield_mask] = 1.0 - np.exp(-(local_strain[yield_mask] - METRIC_YIELD_THRESHOLD) / SOFTENING_MODULUS)
+
+    # Damage irreversibility and saturation constraint (95%)
+    D_updated = np.minimum(np.maximum(D_prev, D_new), 0.95)
+
+    return local_strain, u, v, D_updated
+
+
+# --- 3. EFFECTIVE GRAVITATIONAL COUPLING ---
+def compute_effective_gravity(D_state):
+    """Derives g_eff as a function of the local metric integrity state."""
+    return G_BASE * (1.0 - D_state)
+
+
+# ==============================================================================
+# COMPUTATIONAL EXECUTION AND LOGGING
+# ==============================================================================
+print("[LOG] Initializing primordial density field...")
+mass_field = generate_density_field(GRID_RESOLUTION)
+
+u_state = np.zeros((GRID_RESOLUTION, GRID_RESOLUTION))
+v_state = np.zeros((GRID_RESOLUTION, GRID_RESOLUTION))
+D_state = np.zeros((GRID_RESOLUTION, GRID_RESOLUTION))
+
+frames = 60
+z_steps = np.linspace(Z_START, -0.05, frames)
+simulation_results = []
+
+print(f"[LOG] Executing incremental mechanical solver over {frames} redshift steps.")
+
+for i, z_val in enumerate(z_steps):
+    strain_global = get_kinematic_strain(z_val)
+
+    if strain_global > 0:
+        strain_local, u_state, v_state, D_state = solver_mechanical_step(
+            mass_field, u_state, v_state, D_state, strain_global
+        )
+        g_eff_field = compute_effective_gravity(D_state)
+    else:
+        strain_local = np.zeros_like(mass_field)
+        g_eff_field = np.ones_like(mass_field)
+
+    # Observational Telemetry Extraction
+    yield_fraction = np.sum(D_state > 0.05) / (GRID_RESOLUTION ** 2) * 100
+    g_min, g_mean = g_eff_field.min(), g_eff_field.mean()
+
+    simulation_results.append([i, z_val, strain_global * 100, yield_fraction, g_min, g_mean])
+
+# --- SCIENTIFIC DATA LOG ---
+print("\n" + "=" * 85)
+print("  COSMOLOGICAL METRIC YIELDING AND EFFECTIVE GRAVITATIONAL COUPLING ANALYSIS")
+print("=" * 85)
+header = f"{'Step':<6} | {'Redshift':<10} | {'Global Strain':<15} | {'Yield Fraction':<16} | {'Min g_eff':<11} | {'Mean g_eff':<11}"
+print(header)
+print("-" * 85)
+
+for res in simulation_results:
+    # Sampling output for readability (every 3rd step + Step 37/Current Epoch)
+    if res[0] % 3 == 0 or res[0] == 37:
+        print(
+            f"{res[0]:<6d} | {res[1]:<10.4f} | {res[2]:>10.3f}%      | {res[3]:>10.2f}%       | {res[4]:<11.4f} | {res[5]:<11.4f}")
+
+print("=" * 85)
+print("[INFO] Simulation sequence completed successfully.")
