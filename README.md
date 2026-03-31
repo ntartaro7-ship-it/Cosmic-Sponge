@@ -30,6 +30,7 @@ The provided code replicates the phenomenological tests used to resolve the thre
 
 1. Clone this repository:
    ```bash
+   https://github.com/ntartaro7-ship-it
 2. Install the required libraries (NumPy, Pandas, Matplotlib):
    pip install -r requirements.txt
 3. Run the validation scripts:
