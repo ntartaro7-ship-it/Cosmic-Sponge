@@ -1,0 +1,84 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# --- PHYSICAL CONSTANTS AND CONFIGURATION ---
+# Pantheon+SH0ES Dataset Analysis - Anisotropy Validation
+FILE_PATH = "Pantheon+SH0ES.dat"
+C_LIGHT = 299792.458  # Speed of light in km/s
+
+def execute_anisotropy_validation():
+    """
+    Performs a hemispheric consistency test to detect directional bias
+    in the vacuum structural yielding process.
+    """
+    try:
+        df = pd.read_table(FILE_PATH, sep=r'\s+', comment='#')
+        print(f"[INFO] Dataset loaded successfully: {len(df)} Supernovae.")
+    except Exception as e:
+        print(f"[ERROR] Failed to load dataset: {e}")
+        return
+
+    # Data Cleaning and Observational H0 Derivation
+    # Redshift cut z > 0.01 to minimize local peculiar velocity bias
+    df = df[df['zHD'] > 0.01].copy()
+    df['dL'] = 10 ** ((df['MU_SH0ES'] - 25) / 5)
+    df['H0_obs'] = (C_LIGHT * df['zHD']) / df['dL']
+
+    # --- HEMISPHERIC SEGREGATION (NORTH vs SOUTH) ---
+    df_north = df[df['DEC'] >= 0].copy()
+    df_south = df[df['DEC'] < 0].copy()
+
+    def process_hemispheric_data(data, label):
+        """Processes logarithmic binning and local yielding slope estimation."""
+        # Logarithmic binning for high-redshift resolution
+        bins = np.logspace(np.log10(data['zHD'].min()), np.log10(data['zHD'].max()), 10)
+        data['bin'] = pd.cut(data['zHD'], bins)
+        binned = data.groupby('bin', observed=True).agg(
+            z=('zHD', 'mean'),
+            H0=('H0_obs', 'mean'),
+            err=('H0_obs', 'sem')
+        ).dropna().reset_index()
+
+        # Linear regression for local slope (z < 0.1) prior to global structural yield
+        mask = binned['z'] < 0.1
+        slope = np.polyfit(np.log2(binned['z'][mask]), binned['H0'][mask], 1)[0]
+        return binned, slope
+
+    b_north, s_north = process_hemispheric_data(df_north, "NORTH")
+    b_south, s_south = process_hemispheric_data(df_south, "SOUTH")
+
+    # --- COMPARATIVE PHENOMENOLOGICAL ANALYSIS ---
+    plt.figure(figsize=(12, 7))
+    plt.errorbar(b_north['z'], b_north['H0'], yerr=b_north['err'], fmt='o-', color='blue',
+                 label=f'Northern Hemisphere (Slope: {s_north:.3f})')
+    plt.errorbar(b_south['z'], b_south['H0'], yerr=b_south['err'], fmt='o-', color='red',
+                 label=f'Southern Hemisphere (Slope: {s_south:.3f})')
+
+    plt.xscale('log')
+    plt.xlabel('Redshift (zHD) - Metric Distance Expansion')
+    plt.ylabel('Measured H0 (km/s/Mpc)')
+    plt.title('Test 3: Structural Vacuum Anisotropy Analysis (North vs. South Grain)')
+    plt.legend()
+    plt.grid(True, which="both", alpha=0.1)
+
+    print("-" * 60)
+    print(f"ANISOTROPY TEST RESULTS:")
+    print(f"Northern Yielding Slope: {s_north:.4f} km/s/Mpc/octave")
+    print(f"Southern Yielding Slope: {s_south:.4f} km/s/Mpc/octave")
+    print(f"Absolute Discrepancy (Delta): {abs(s_north - s_south):.4f}")
+    print("-" * 60)
+
+    # Statistical Threshold for Structural Isotropy
+    if abs(s_north - s_south) > 0.1:
+        print("CONCLUSION: SIGNIFICANT ANISOTROPY DETECTED.")
+        print("The vacuum fabric exhibits a directional bias in its structural yielding.")
+    else:
+        print("CONCLUSION: ISOTROPY OBSERVED.")
+        print("Yielding properties appear uniform across the metric sample.")
+    print("-" * 60)
+
+    plt.show()
+
+if __name__ == "__main__":
+    execute_anisotropy_validation()
